@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Settings>
+  <!-- 仿真模式: 无需真实硬件即可运行 -->
+  <UseSimulation>true</UseSimulation>
+  <SimGenerateImages>true</SimGenerateImages>
+  <SimImageDir>SimImages</SimImageDir>
+
+  <!-- Modbus (仿真模式下串口配置被忽略) -->
+  <PortName>SIM-PLC-01</PortName>
+  <BaudRate>38400</BaudRate>
+  <DataBits>8</DataBits>
+  <StopBits>One</StopBits>
+  <Parity>None</Parity>
+  <DeviceId>1</DeviceId>
+  <UsePLC>true</UsePLC>
+
+  <!-- 相机 (仿真模式下相机配置被忽略) -->
+  <CameraIndex>0</CameraIndex>
+  <CameraUserDefinedName>SimCamera</CameraUserDefinedName>
+  <UseTrigger>true</UseTrigger>
+  <UseSoftTrigger>true</UseSoftTrigger>
+
+  <!-- 本地图像 (仿真模式下作为备选) -->
+  <UseLocalFolder>false</UseLocalFolder>
+  <LocalFolderPath>SimImages</LocalFolderPath>
+  <LocalImageDelay>500</LocalImageDelay>
+  <LoopLocalImages>true</LoopLocalImages>
+
+  <!-- 模型 (仿真模式下使用内置模拟推理) -->
+  <ModelPath>SimImages/sample.dvt</ModelPath>
+  <ModelType>SIM</ModelType>
+
+  <!-- 设备 -->
+  <Speed>100</Speed>
+  <TargetPosition>220</TargetPosition>
+
+  <!-- 图像保存 -->
+  <SavePath>Results</SavePath>
+  <SaveOKImage>true</SaveOKImage>
+  <SaveNGImage>true</SaveNGImage>
+  <ImageFormat>JPG</ImageFormat>
+  <JpegQuality>95</JpegQuality>
+
+  <!-- 拍照延迟 -->
+  <PreCaptureDelay>100</PreCaptureDelay>
+</Settings>

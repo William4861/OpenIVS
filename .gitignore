@@ -1,0 +1,53 @@
+# .NET
+bin/
+obj/
+*.user
+*.suo
+*.sln.docstates
+*.log
+*.vsidx
+*.db
+*.db-shm
+*.db-wal
+*.opendb
+
+# VS
+.vs/
+.vscode/
+*.csproj.user
+
+# NuGet
+packages/
+*.nupkg
+
+# Build results
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+
+# Simulation output
+Simulation/bin/
+Simulation/obj/
+
+# OpenIVS output
+OpenIVSWPF/bin/
+OpenIVSWPF/obj/
+
+# Other projects output
+DlcvCsharpApi/bin/
+DlcvCsharpApi/obj/
+ImageViewer/bin/
+ImageViewer/obj/
+ModbusApi/bin/
+ModbusApi/obj/
+SimpleLogger/bin/
+SimpleLogger/obj/
+
+# Image results
+Results/
+SimResults/
+
+# OS
+Thumbs.db
+.DS_Store

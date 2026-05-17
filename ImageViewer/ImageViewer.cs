@@ -1,0 +1,834 @@
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+using dlcv_infer_csharp;
+using Newtonsoft.Json.Linq;
+using OpenCvSharp;
+using OpenCvSharp.Extensions;
+using static dlcv_infer_csharp.Utils;
+
+namespace DLCV
+{
+    public class ImageViewer : Panel
+    {
+        private const float NormalizedDpi = 96.0f;
+        private Image _image;
+        private float _scale = 1.0f;
+        private System.Drawing.PointF _imagePosition = new PointF(0, 0);
+        private System.Drawing.Point _lastMousePosition;
+        private bool _isDragging = false;
+
+        public Image image
+        {
+            get
+            {
+                lock (_Lock)
+                {
+                    return _image;
+                }
+            }
+            set
+            {
+                Image clonedImage = value == null ? null : (Image)value.Clone();
+                if (clonedImage is Bitmap bitmap)
+                {
+                    NormalizeBitmapDpi(bitmap);
+                }
+
+                lock (_Lock)
+                {
+                    Image oldImage = _image;
+                    _image = clonedImage;
+
+                    if (_image != null)
+                    {
+                        FitImageToPanelUnsafe();
+                        CalculateMinScaleUnsafe();
+                    }
+                    else
+                    {
+                        _scale = 1.0f;
+                        _imagePosition = new PointF(0, 0);
+                    }
+
+                    oldImage?.Dispose();
+                }
+            }
+        }
+
+
+        public float MaxScale { get; set; } = 100.0f;
+        public float MinScale { get; set; } = 0.5f;
+
+        [DefaultValue(24f)]
+        public float VisualizationBaseFontSize { get; set; } = 24f;
+
+        [DefaultValue(8f)]
+        public float VisualizationMinFontSize { get; set; } = 8f;
+
+        // 新增参数控制是否显示状态文本
+        public bool ShowStatusText { get; set; } = false;
+
+        // 控制是否显示可视化结果（框、Mask、文字等）
+        public bool ShowVisualization { get; set; } = true;
+
+        // 标签文字显示模式：类别+分数 / 仅类别 / 不显示
+        public enum LabelTextMode
+        {
+            CategoryAndScore = 0,
+            CategoryOnly = 1,
+            None = 2
+        }
+
+        // 当前标签显示模式，按 C 键在三种模式之间循环切换。
+        public LabelTextMode LabelDisplayMode { get; set; } = LabelTextMode.CategoryAndScore;
+
+        // 兼容旧属性：保持 bool 语义——None 关闭，其他模式为显示。
+        public bool ShowLabelText
+        {
+            get => LabelDisplayMode != LabelTextMode.None;
+            set => LabelDisplayMode = value ? LabelTextMode.CategoryAndScore : LabelTextMode.None;
+        }
+
+        // 标签字体缩放倍率（默认 1.0），支持运行时通过快捷键调整。
+        private float _labelFontScale = 1.0f;
+        public float LabelFontScale
+        {
+            get => _labelFontScale;
+            set
+            {
+                float v = value;
+                if (v < MinLabelFontScale) v = MinLabelFontScale;
+                if (v > MaxLabelFontScale) v = MaxLabelFontScale;
+                if (Math.Abs(v - _labelFontScale) > 1e-4f)
+                {
+                    _labelFontScale = v;
+                    Invalidate();
+                }
+            }
+        }
+
+        public float MinLabelFontScale { get; set; } = 0.3f;
+        public float MaxLabelFontScale { get; set; } = 5.0f;
+        public float LabelFontScaleStep { get; set; } = 1.1f;
+
+        public ImageViewer()
+        {
+            this.DoubleBuffered = true; // Enable double buffering
+            this.SetStyle(ControlStyles.ResizeRedraw, true); // Redraw on resize
+            this.SetStyle(ControlStyles.Selectable, true); // Allow control to accept focus
+            this.TabStop = true;
+        }
+
+        // 处理键盘事件
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            base.OnKeyDown(e);
+            switch (e.KeyCode)
+            {
+                case Keys.V:
+                    ShowVisualization = !ShowVisualization;
+                    Invalidate();
+                    break;
+                case Keys.C:
+                    LabelDisplayMode = (LabelTextMode)(((int)LabelDisplayMode + 1) % 3);
+                    Invalidate();
+                    break;
+                case Keys.Oemplus:
+                case Keys.Add:
+                    LabelFontScale = _labelFontScale * LabelFontScaleStep;
+                    break;
+                case Keys.OemMinus:
+                case Keys.Subtract:
+                    LabelFontScale = _labelFontScale / LabelFontScaleStep;
+                    break;
+                case Keys.D0:
+                case Keys.NumPad0:
+                    LabelFontScale = 1.0f;
+                    break;
+            }
+        }
+
+        private readonly object _Lock = new object();
+
+        private void FitImageToPanelUnsafe()
+        {
+            if (_image == null)
+            {
+                return;
+            }
+
+            if (Width <= 0 || Height <= 0)
+            {
+                _scale = 1.0f;
+                _imagePosition = new PointF(0, 0);
+                return;
+            }
+
+            float panelAspect = (float)Width / Height;
+            float imageAspect = (float)_image.Width / _image.Height;
+
+            if (panelAspect > imageAspect)
+            {
+                // 面板更宽，按高度填充
+                _scale = (float)Height / _image.Height;
+            }
+            else
+            {
+                // 面板更高，按宽度填充
+                _scale = (float)Width / _image.Width;
+            }
+
+            // 计算图像初始位置以居中
+            _imagePosition.X = (Width - _image.Width * _scale) / 2;
+            _imagePosition.Y = (Height - _image.Height * _scale) / 2;
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            lock (_Lock)
+            {
+                base.OnPaint(e);
+                if (_image != null)
+                {
+                    e.Graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
+
+                    e.Graphics.TranslateTransform(_imagePosition.X, _imagePosition.Y);
+                    e.Graphics.ScaleTransform(_scale, _scale);
+                    e.Graphics.DrawImage(_image, 0, 0, _image.Width, _image.Height);
+                }
+
+                if (currentResults != null)
+                {
+                    DrawResults(e);
+                }
+            }
+        }
+
+        public void UpdateImageAndResult(dynamic image, CSharpResult currentResults)
+        {
+            lock (_Lock)
+            {
+                UpdateImage(image);
+                UpdateResults(currentResults);
+                Update();
+            }
+        }
+
+        protected override void OnMouseWheel(MouseEventArgs e)
+        {
+            base.OnMouseWheel(e);
+            if (_image == null) return;
+
+            // Ctrl + 滚轮：调整标签字体大小，不缩放图像
+            if ((Control.ModifierKeys & Keys.Control) == Keys.Control)
+            {
+                if (e.Delta > 0)
+                {
+                    LabelFontScale = _labelFontScale * LabelFontScaleStep;
+                }
+                else if (e.Delta < 0)
+                {
+                    LabelFontScale = _labelFontScale / LabelFontScaleStep;
+                }
+                return;
+            }
+
+            bool shouldInvalidate = false;
+            lock (_Lock)
+            {
+                if (_image == null) return;
+
+                float oldScale = _scale;
+
+                if (e.Delta > 0 && _scale < MaxScale)
+                {
+                    _scale *= 1.1f;
+                }
+                else if (e.Delta < 0 && _scale > MinScale)
+                {
+                    _scale /= 1.1f;
+                }
+
+                // Calculate the new image position to zoom around the mouse pointer
+                float scaleChange = _scale / oldScale;
+                _imagePosition.X = e.X - scaleChange * (e.X - _imagePosition.X);
+                _imagePosition.Y = e.Y - scaleChange * (e.Y - _imagePosition.Y);
+
+                AdjustImagePositionUnsafe();
+                shouldInvalidate = true;
+            }
+
+            if (shouldInvalidate)
+            {
+                Invalidate();
+            }
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            this.Focus(); // 获取焦点以便接收键盘事件
+            base.OnMouseDown(e);
+            lock (_Lock)
+            {
+                if (e.Button == MouseButtons.Left)
+                {
+                    _isDragging = true;
+                    _lastMousePosition = e.Location;
+                }
+            }
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            bool shouldInvalidate = false;
+            lock (_Lock)
+            {
+                if (_isDragging)
+                {
+                    float dx = e.X - _lastMousePosition.X;
+                    float dy = e.Y - _lastMousePosition.Y;
+                    _imagePosition.X += dx;
+                    _imagePosition.Y += dy;
+                    _lastMousePosition = e.Location;
+
+                    AdjustImagePositionUnsafe();
+                    shouldInvalidate = true;
+                }
+            }
+
+            if (shouldInvalidate)
+            {
+                Invalidate();
+            }
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            base.OnMouseUp(e);
+            lock (_Lock)
+            {
+                if (e.Button == MouseButtons.Left)
+                {
+                    _isDragging = false;
+                }
+            }
+        }
+
+        private void AdjustImagePosition()
+        {
+            lock (_Lock)
+            {
+                AdjustImagePositionUnsafe();
+            }
+        }
+
+        private void AdjustImagePositionUnsafe()
+        {
+            if (_image == null) return;
+
+            int panelWidth = Width;
+            int panelHeight = Height;
+            float scaledWidth = _image.Width * _scale;
+            float scaledHeight = _image.Height * _scale;
+
+            // 自定义 Clamp 方法
+            float Clamp(float value, float min, float max)
+            {
+                return value < min ? min : (value > max ? max : value);
+            }
+
+            // 分轴独立计算坐标边界
+            void CalculateAxisBoundary(float position, float scaledSize, int panelSize, out float newPosition)
+            {
+                // 计算图片右/下边界
+                float farEdge = position + scaledSize;
+
+                // 核心逻辑：确保图片始终在可视区域内至少露出 100px
+                float minEdge = 100 - scaledSize;  // 当图片完全左/上移时，右/下边界至少露出 100px
+                float maxEdge = panelSize - 100;   // 当图片完全右/下移时，左/上边界至少露出 100px
+
+                newPosition = Clamp(position, minEdge, maxEdge);
+
+                // 特殊场景优化：当图片尺寸小于 Panel 时，强制居中（可选）
+                //if (scaledSize < panelSize)
+                //{
+                //    newPosition = Clamp(position, 100, panelSize - scaledSize - 100);
+                //}
+            }
+
+            // 计算 X 轴位置
+            CalculateAxisBoundary(_imagePosition.X, scaledWidth, panelWidth, out float newX);
+
+            // 计算 Y 轴位置
+            CalculateAxisBoundary(_imagePosition.Y, scaledHeight, panelHeight, out float newY);
+
+            _imagePosition = new PointF(newX, newY);
+        }
+
+        public CSharpResult? currentResults;
+        // 外部可以调用的，更新图像内容
+        public void UpdateImage(Image image)
+        {
+            this.image = image;
+        }
+
+        // 支持 opencv 的 Mat 类型（显示仅三通道；四通道先 BGRA→BGR 再转 Bitmap）
+        public void UpdateImage(Mat image)
+        {
+            if (image == null || image.Empty())
+                return;
+            Mat display = image;
+            Mat converted = null;
+            try
+            {
+                if (image.Channels() == 4)
+                {
+                    converted = new Mat();
+                    Cv2.CvtColor(image, converted, ColorConversionCodes.BGRA2BGR);
+                    display = converted;
+                }
+                using (Bitmap bitmap = OpenCvSharp.Extensions.BitmapConverter.ToBitmap(display))
+                {
+                    UpdateImage(bitmap);
+                }
+            }
+            finally
+            {
+                converted?.Dispose();
+            }
+        }
+
+        public void UpdateResults(dynamic result)
+        {
+            lock (_Lock)
+            {
+                currentResults = result;
+            }
+        }
+
+
+
+        public void ClearResults()
+        {
+            lock (_Lock)
+            {
+                currentResults = null;
+            }
+        }
+
+        public void DrawResults(PaintEventArgs e)
+        {
+            if (currentResults == null || !ShowVisualization) return;
+
+            float borderWidth = Math.Max(1, 2 / _scale); // 更细的边框
+
+            // 屏幕渲染字号按 clamp(baseFont * scale, baseFont, 128) * labelFontScale 计算
+            const float MaxFontPx = 128f;
+            float baseFontPx = VisualizationBaseFontSize;
+            float screenFontPx = Math.Min(Math.Max(baseFontPx * _scale, baseFontPx), MaxFontPx) * _labelFontScale;
+            float fontSize = Math.Max(VisualizationMinFontSize, screenFontPx / _scale);
+            string _statusText = "OK";
+
+            // 遍历结构体的嵌套结构
+            if (currentResults.Value.SampleResults.Count == 0)
+            {
+                _statusText = "No Result";
+                ShowStatusText = true;
+            }
+            else
+            {
+                var sampleResult = currentResults.Value.SampleResults[0];
+                int topLeftLabelIndex = 0;
+                float safeScale = Math.Max(_scale, 1e-6f);
+                float topLeftPadding = Math.Max(2f, 10f / safeScale);
+
+                foreach (var objResult in sampleResult.Results)
+                {
+                    // 获取对象属性
+                    string categoryName = objResult.CategoryName;
+                    float score = objResult.Score;
+                    var bbox = objResult.Bbox;
+                    bool hasBbox = objResult.WithBbox && bbox != null && bbox.Count >= 4;
+
+                    // 颜色处理（根据结果内容设置颜色）
+                    Color color = Color.Red; // 默认红色
+
+                    // 判断categoryName内容（忽略大小写）
+                    string categoryNameLower = categoryName.ToLower();
+                    if (categoryNameLower.Contains("ok"))
+                    {
+                        color = Color.Green;
+                    }
+                    else if (categoryNameLower.Contains("ng"))
+                    {
+                        color = Color.Red;
+                    }
+                    // 其他情况保持默认红色
+
+                    // 判断是否显示NG状态
+                    if (!categoryNameLower.Contains("ok"))
+                        _statusText = "NG";
+
+                    if (!hasBbox)
+                    {
+                        // 无框结果（分类、OCR 等）：标签画在图像内部（左上角），与 C++ 测试程序一致
+                        if (LabelDisplayMode != LabelTextMode.None)
+                        {
+                            string label = LabelDisplayMode == LabelTextMode.CategoryAndScore
+                                ? $"{categoryName} {score:F2}"
+                                : $"{categoryName}";
+                            if (!string.IsNullOrEmpty(label))
+                            {
+                                using (Font font = new Font("Microsoft YaHei", fontSize))
+                                {
+                                    SizeF textSize = e.Graphics.MeasureString(label, font);
+                                    float textTopY = topLeftPadding + topLeftLabelIndex * (textSize.Height + topLeftPadding / 2f);
+
+                                    // 绘制半透明黑色背景
+                                    using (SolidBrush backgroundBrush = new SolidBrush(Color.FromArgb(160, 0, 0, 0)))
+                                    {
+                                        e.Graphics.FillRectangle(backgroundBrush, topLeftPadding, textTopY, textSize.Width, textSize.Height);
+                                    }
+
+                                    // 绘制文字
+                                    using (SolidBrush textBrush = new SolidBrush(color))
+                                    {
+                                        e.Graphics.DrawString(label, font, textBrush, topLeftPadding, textTopY);
+                                    }
+                                }
+                                topLeftLabelIndex++;
+                            }
+                        }
+                        continue;
+                    }
+
+                    // 若 extra_info 中存在 polyline，优先叠加绘制开放折线（不闭合）。
+                    var polyline = GetExtraInfoPolyline(objResult.ExtraInfo);
+                    if (polyline != null && polyline.Count >= 2)
+                    {
+                        var linePoints = new PointF[polyline.Count];
+                        for (int pi = 0; pi < polyline.Count; pi++)
+                        {
+                            var p = polyline[pi];
+                            linePoints[pi] = new PointF((float)p.X, (float)p.Y);
+                        }
+                        using (Pen linePen = new Pen(color, borderWidth))
+                        {
+                            e.Graphics.DrawLines(linePen, linePoints);
+                        }
+                    }
+
+                    // 处理旋转框检测
+                    if (objResult.WithAngle)
+                    {
+                        // 旋转框检测：[cx, cy, w, h]
+                        float cx = (float)bbox[0];
+                        float cy = (float)bbox[1];
+                        float w = (float)bbox[2];
+                        float h = (float)bbox[3];
+                        float angle = objResult.Angle;
+
+                        // 计算旋转框的四个角点
+                        PointF[] points = new PointF[4];
+                        float cos = (float)Math.Cos(angle);
+                        float sin = (float)Math.Sin(angle);
+
+                        // 计算相对于中心点的偏移
+                        float[] offsets = new float[] {
+                        -w/2, -h/2,  // 左上
+                        w/2, -h/2,   // 右上
+                        w/2, h/2,    // 右下
+                        -w/2, h/2    // 左下
+                    };
+
+                        // 计算旋转后的四个角点
+                        for (int i = 0; i < 4; i++)
+                        {
+                            float x = offsets[i * 2];
+                            float y = offsets[i * 2 + 1];
+                            points[i] = new PointF(
+                                cx + x * cos - y * sin,
+                                cy + x * sin + y * cos
+                            );
+                        }
+
+                        // 绘制旋转框
+                        using (Pen pen = new Pen(color, borderWidth))
+                        {
+                            // 绘制四条边
+                            for (int i = 0; i < 4; i++)
+                            {
+                                e.Graphics.DrawLine(pen, points[i], points[(i + 1) % 4]);
+                            }
+                        }
+
+                        // 绘制标签文本
+                        if (LabelDisplayMode != LabelTextMode.None)
+                        {
+                            string label = LabelDisplayMode == LabelTextMode.CategoryAndScore
+                                ? $"{categoryName} {score:F2}"
+                                : $"{categoryName}";
+                            using (Font font = new Font("Microsoft YaHei", fontSize))
+                            {
+                                SizeF textSize = e.Graphics.MeasureString(label, font);
+                                // 将文本位置放在旋转框上方
+                                float textX = cx - textSize.Width / 2;
+                                float textY = cy - h / 2 - textSize.Height - 2;
+
+                                // 绘制半透明黑色背景
+                                using (SolidBrush backgroundBrush = new SolidBrush(Color.FromArgb(160, 0, 0, 0)))
+                                {
+                                    e.Graphics.FillRectangle(backgroundBrush, textX, textY, textSize.Width, textSize.Height);
+                                }
+
+                                // 绘制文字
+                                using (SolidBrush textBrush = new SolidBrush(color))
+                                {
+                                    e.Graphics.DrawString(label, font, textBrush, textX, textY);
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        // 普通检测框：[x, y, w, h]
+                        float x = (float)bbox[0];
+                        float y = (float)bbox[1];
+                        float w = (float)bbox[2];
+                        float h = (float)bbox[3];
+
+                        // 处理Mask
+                        if (objResult.WithMask && objResult.Mask != null)
+                        {
+                            using (var maskBitmap = CreateTransparentMaskDirect(objResult.Mask))
+                            {
+                                e.Graphics.DrawImage(maskBitmap, x, y, w, h);
+                            }
+                        }
+
+                        // 绘制边界框
+                        using (Pen pen = new Pen(color, borderWidth))
+                        {
+                            e.Graphics.DrawRectangle(pen, x, y, w, h);
+                        }
+
+                        // 绘制标签文本
+                        if (LabelDisplayMode != LabelTextMode.None)
+                        {
+                            string label = LabelDisplayMode == LabelTextMode.CategoryAndScore
+                                ? $"{categoryName} {score:F2}"
+                                : $"{categoryName}";
+                            using (Font font = new Font("Microsoft YaHei", fontSize))
+                            {
+                                SizeF textSize = e.Graphics.MeasureString(label, font);
+                                float textY = y - textSize.Height - 2;
+
+                                // 绘制半透明黑色背景
+                                using (SolidBrush backgroundBrush = new SolidBrush(Color.FromArgb(160, 0, 0, 0)))
+                                {
+                                    e.Graphics.FillRectangle(backgroundBrush, x, textY, textSize.Width, textSize.Height);
+                                }
+
+                                // 绘制文字
+                                using (SolidBrush textBrush = new SolidBrush(color))
+                                {
+                                    e.Graphics.DrawString(label, font, textBrush, x, textY);
+                                }
+                            }
+                        }
+                    }
+                }
+
+            }
+
+            // 绘制状态文本
+            if (ShowStatusText)
+            {
+                var originalTransform = e.Graphics.Transform;
+                e.Graphics.ResetTransform();
+                using (Font font = new Font("微软雅黑", 24))
+                using (SolidBrush brush = new SolidBrush(_statusText == "OK" ? Color.Green : Color.Red))
+                {
+                    e.Graphics.DrawString(_statusText, font, brush, 10, 10);
+                }
+                e.Graphics.Transform = originalTransform;
+            }
+        }
+
+        public Bitmap CreateVisualizationBitmap()
+        {
+            lock (_Lock)
+            {
+                if (_image == null)
+                {
+                    throw new InvalidOperationException("当前没有可导出的图像。");
+                }
+
+                Bitmap output = new Bitmap(_image.Width, _image.Height, PixelFormat.Format24bppRgb);
+                using (Graphics graphics = Graphics.FromImage(output))
+                {
+                    graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
+                    graphics.DrawImage(_image, 0, 0, _image.Width, _image.Height);
+
+                    float originalScale = _scale;
+                    try
+                    {
+                        _scale = 1.0f;
+                        using (PaintEventArgs paintArgs = new PaintEventArgs(graphics, new Rectangle(0, 0, output.Width, output.Height)))
+                        {
+                            DrawResults(paintArgs);
+                        }
+                    }
+                    finally
+                    {
+                        _scale = originalScale;
+                    }
+                }
+
+                return output;
+            }
+        }
+
+        // 操作Mat数据创建透明蒙版
+        private unsafe Bitmap CreateTransparentMaskDirect(Mat mask)
+        {
+            int width = mask.Width;
+            int height = mask.Height;
+
+            // 创建目标Bitmap
+            Bitmap result = new Bitmap(width, height, PixelFormat.Format32bppArgb);
+            BitmapData bmpData = result.LockBits(
+                new Rectangle(0, 0, width, height),
+                ImageLockMode.WriteOnly,
+                PixelFormat.Format32bppArgb);
+
+            try
+            {
+                // 直接访问Mat数据（假设mask是8UC1格式）
+                byte* maskPtr = (byte*)mask.DataPointer;
+                byte* bmpPtr = (byte*)bmpData.Scan0;
+
+                // 预定义颜色值（ARGB格式，半透明绿色）
+                const int alpha = 128;
+                const int blue = 0;
+                const int green = 255;
+                const int red = 0;
+
+                // 并行处理每个像素
+                Parallel.For(0, height, y =>
+                {
+                    byte* maskRow = maskPtr + y * mask.Step();
+                    byte* bmpRow = bmpPtr + y * bmpData.Stride;
+
+                    for (int x = 0; x < width; x++)
+                    {
+                        int bmpPos = x * 4;
+                        if (maskRow[x] > 0) // 掩码有效区域
+                        {
+                            bmpRow[bmpPos] = blue;     // B
+                            bmpRow[bmpPos + 1] = green; // G
+                            bmpRow[bmpPos + 2] = red;   // R
+                            bmpRow[bmpPos + 3] = alpha; // A
+                        }
+                        else // 透明区域
+                        {
+                            *(int*)(bmpRow + bmpPos) = 0; // 一次性置零
+                        }
+                    }
+                });
+            }
+            finally
+            {
+                result.UnlockBits(bmpData);
+            }
+
+            return result;
+        }
+
+        private static void NormalizeBitmapDpi(Bitmap bitmap)
+        {
+            if (Math.Abs(bitmap.HorizontalResolution - NormalizedDpi) < 0.01f &&
+                Math.Abs(bitmap.VerticalResolution - NormalizedDpi) < 0.01f)
+            {
+                return;
+            }
+
+            bitmap.SetResolution(NormalizedDpi, NormalizedDpi);
+        }
+
+        new public void Update()
+        {
+            Invalidate();
+        }
+
+        // 新增的计算MinScale的方法
+        private void CalculateMinScale()
+        {
+            lock (_Lock)
+            {
+                CalculateMinScaleUnsafe();
+            }
+        }
+
+        private void CalculateMinScaleUnsafe()
+        {
+            if (_image == null) return;
+
+            if (Width <= 0 || Height <= 0)
+            {
+                return;
+            }
+
+            // 计算面板的最短边长度
+            float panelMinDimension = Math.Min(this.Width, this.Height);
+
+            // 计算图像的最长边长度
+            float imageMaxDimension = Math.Max(_image.Width, _image.Height);
+
+            // 计算MinScale，使得图像能缩小到panel最短边的一半大小
+            MinScale = (panelMinDimension / 2) / imageMaxDimension;
+        }
+
+        // 当Panel大小改变时重新计算MinScale
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            lock (_Lock)
+            {
+                CalculateMinScaleUnsafe();
+                AdjustImagePositionUnsafe();
+            }
+        }
+
+        // 添加右键点击事件处理
+        protected override void OnMouseClick(MouseEventArgs e)
+        {
+            base.OnMouseClick(e);
+            bool shouldInvalidate = false;
+            lock (_Lock)
+            {
+                if (e.Button == MouseButtons.Right && _image != null)
+                {
+                    FitImageToPanelUnsafe();
+
+                    // 调整位置确保图像始终可见
+                    AdjustImagePositionUnsafe();
+                    shouldInvalidate = true;
+                }
+            }
+
+            if (shouldInvalidate)
+            {
+                Invalidate();
+            }
+        }
+    }
+}
