@@ -1,12 +1,12 @@
 # OpenIVS — Open Source Industrial Vision System
 
-开源工业机器视觉检测系统，提供完整的**图像采集 → AI 推理 → 结果判定 → 运动控制**闭环。支持硬件仿真模式，无需真实相机、PLC 或推理引擎即可运行。
+开源工业机器视觉检测系统，覆盖**图像采集 → AI 推理 → 结果判定 → 运动控制**全流程。支持硬件仿真模式，无需真实相机、PLC 或推理引擎即可运行。
 
 ## 快速开始
 
 ```bash
 # 1. 克隆
-git clone https://github.com/yourname/OpenIVS.git
+git clone https://github.com/William4861/OpenIVS.git
 cd OpenIVS
 
 # 2. 用 Visual Studio 2022 打开
@@ -61,8 +61,8 @@ OpenIVS/
 | 硬件 | 仿真实现 | 行为 |
 |------|----------|------|
 | 工业相机 | 生成 PCB/金属表面合成图像 | 随机注入划痕/凹坑/污渍/裂纹/偏移 |
-| PLC | 内存状态机 | 支持位置 1-2-3-2-1 循环，20ms 步进 |
-| 推理模型 | 基于像素分析 | 30-80ms 推理，含类别/置信度/bbox |
+| PLC | 内存状态机 | 支持位置 1-2-3-2-1 循环，20ms 步进（模拟节拍） |
+| 推理模型 | 基于像素分析 | 模拟 30-80ms 推理耗时，含类别/置信度/bbox |
 
 启用方式：
 - 配置 `settings.xml` 中 `<UseSimulation>true</UseSimulation>`
